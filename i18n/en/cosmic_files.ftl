@@ -379,7 +379,7 @@ contains-item-count = contains {$count} {$count ->
     [one] item
    *[other] items
 }
-selection-footer-summary = {$folders}, {$files} selected ({$size})
+selection-footer-summary = {$selection} selected ({$size})
 
 ## View
 zoom-in = Zoom in
