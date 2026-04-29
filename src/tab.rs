@@ -13,11 +13,10 @@ use cosmic::{
         clipboard::dnd::DndAction,
         futures::{self, SinkExt},
         keyboard::Modifiers,
-        padding, stream,
+        stream,
         widget::{
             rule,
             scrollable::{self, AbsoluteOffset, Viewport},
-            stack,
         },
         window,
     },
@@ -47,7 +46,7 @@ use std::{
     borrow::Cow,
     cell::Cell,
     cmp::{Ordering, Reverse},
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     error::Error,
     fmt::{self, Display},
     fs::{self, File, Metadata},
@@ -86,6 +85,9 @@ use crate::{
     thumbnailer::thumbnailer,
     trash::{Trash, TrashExt},
 };
+
+mod selection;
+pub(crate) use selection::{SelectionStats, selection_menu_actions};
 
 pub const DOUBLE_CLICK_DURATION: Duration = Duration::from_millis(500);
 pub const HOVER_DURATION: Duration = Duration::from_millis(1600);
@@ -287,99 +289,8 @@ fn button_style(
     }
 }
 
-fn selection_action_button_appearance(
-    theme: &theme::Theme,
-    hovered: bool,
-    pressed: bool,
-    disabled: bool,
-) -> widget::button::Style {
-    let cosmic = theme.cosmic();
-    let mut appearance = widget::button::Style::new();
-    let mut background: Color = if pressed {
-        cosmic.button.pressed.into()
-    } else if hovered {
-        cosmic.button.hover.into()
-    } else {
-        cosmic.button.base.into()
-    };
-
-    appearance.text_color = Some(cosmic.button.on.into());
-    appearance.icon_color = Some(cosmic.button.on.into());
-    appearance.border_radius = cosmic.corner_radii.radius_xl.into();
-
-    if disabled {
-        background.a *= 0.5;
-        appearance.text_color = Some(cosmic.button.on_disabled.into());
-        appearance.icon_color = Some(cosmic.button.on_disabled.into());
-    }
-
-    appearance.background = Some(background.into());
-    appearance
-}
-
-fn selection_action_button_class() -> theme::Button {
-    theme::Button::Custom {
-        active: Box::new(|_, theme| selection_action_button_appearance(theme, false, false, false)),
-        disabled: Box::new(|theme| selection_action_button_appearance(theme, false, false, true)),
-        hovered: Box::new(|_, theme| selection_action_button_appearance(theme, true, false, false)),
-        pressed: Box::new(|_, theme| selection_action_button_appearance(theme, true, true, false)),
-    }
-}
-
-fn selection_action_icon_button(
-    icon: widget::icon::Handle,
-    message: Message,
-) -> widget::Button<'static, Message> {
-    widget::button::custom(
-        widget::container(widget::icon::icon(icon).size(16))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill),
-    )
-    .width(Length::Fixed(32.0))
-    .height(Length::Fixed(32.0))
-    .padding(0)
-    .class(theme::Button::Icon)
-    .on_press(message)
-}
-
-fn selection_action_button(label: String, message: Message) -> widget::Button<'static, Message> {
-    widget::button::custom(
-        widget::container(widget::text(label))
-            .width(Length::Shrink)
-            .height(Length::Fill)
-            .center_y(Length::Fill),
-    )
-    .height(Length::Fixed(36.0))
-    .padding([0, 18])
-    .class(selection_action_button_class())
-    .on_press(message)
-}
-
-fn selection_more_menu_button() -> widget::Button<'static, Message> {
-    widget::button::custom(
-        widget::container(widget::icon::from_name("view-more-symbolic").size(16))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill),
-    )
-    .width(Length::Fixed(32.0))
-    .height(Length::Fixed(32.0))
-    .padding(0)
-    .class(theme::Button::Icon)
-    .on_press(Message::None)
-}
-
 pub fn folder_icon(path: &PathBuf, icon_size: u16) -> widget::icon::Handle {
     widget::icon::from_name(SPECIAL_DIRS.get(path).map_or("folder", |x| *x))
-        .size(icon_size)
-        .handle()
-}
-
-pub fn delete_action_icon(icon_size: u16) -> widget::icon::Handle {
-    widget::icon::from_name("edit-delete-symbolic")
         .size(icon_size)
         .handle()
 }
@@ -444,7 +355,7 @@ fn tab_complete(path: &Path) -> Result<Vec<(String, PathBuf)>, Box<dyn Error>> {
 }
 
 //TODO: translate, add more levels?
-pub(crate) fn format_size(size: u64) -> String {
+fn format_size(size: u64) -> String {
     const KB: u64 = 1000;
     const MB: u64 = 1000 * KB;
     const GB: u64 = 1000 * MB;
@@ -1833,7 +1744,6 @@ pub enum Message {
     ItemUp,
     Location(Location),
     LocationUp,
-    None,
     Open(Option<PathBuf>),
     Reload,
     RightClick(Option<Point>, Option<usize>),
@@ -1883,42 +1793,6 @@ impl MenuAction for LocationMenuAction {
 
     fn message(&self) -> Self::Message {
         Message::LocationMenuAction(*self)
-    }
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum SelectionMenuAction {
-    Open,
-    Duplicate,
-    MoveTo,
-    RestoreFromTrash,
-}
-
-impl SelectionMenuAction {
-    pub fn app_action(self) -> Action {
-        match self {
-            Self::Open => Action::Open,
-            Self::Duplicate => Action::Duplicate,
-            Self::MoveTo => Action::MoveTo,
-            Self::RestoreFromTrash => Action::RestoreFromTrash,
-        }
-    }
-
-    pub fn label(self) -> String {
-        match self {
-            Self::Open => fl!("open"),
-            Self::Duplicate => fl!("duplicate"),
-            Self::MoveTo => fl!("move-to"),
-            Self::RestoreFromTrash => fl!("restore-from-trash"),
-        }
-    }
-}
-
-impl MenuAction for SelectionMenuAction {
-    type Message = Message;
-
-    fn message(&self) -> Self::Message {
-        Message::ContextAction(self.app_action())
     }
 }
 
@@ -2001,97 +1875,6 @@ impl ItemMetadata {
             _ => None,
         }
     }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct SelectionStats {
-    pub selected_items: usize,
-    pub selected_files: usize,
-    pub selected_folders: usize,
-    pub contained_items: u64,
-    pub contains_items_known: bool,
-    pub total_size: u64,
-    pub calculating_dir_size: bool,
-    pub unknown_size: bool,
-    pub dir_size_error: Option<String>,
-}
-
-impl SelectionStats {
-    pub fn can_open(&self) -> bool {
-        (self.selected_items > 0 && self.selected_folders == 0)
-            || (self.selected_folders == 1 && self.selected_items == 1)
-    }
-
-    pub fn files_label(&self) -> String {
-        fl!("file-count", count = self.selected_files)
-    }
-
-    pub fn folders_label(&self) -> String {
-        fl!("folder-count", count = self.selected_folders)
-    }
-
-    pub fn contains_label(&self) -> Option<String> {
-        if self.selected_folders == 0 || !self.contains_items_known {
-            return None;
-        }
-
-        Some(fl!("contains-item-count", count = self.contained_items))
-    }
-
-    pub fn breakdown_text(&self) -> String {
-        let mut parts = Vec::with_capacity(2);
-        if self.selected_files > 0 {
-            parts.push(self.files_label());
-        }
-        if self.selected_folders > 0 {
-            parts.push(self.folders_label());
-        }
-
-        let mut text = parts.join(", ");
-        if let Some(contains) = self.contains_label() {
-            text.push_str(&format!(" ({contains})"));
-        }
-        text
-    }
-
-    pub fn size_text(&self) -> String {
-        if self.calculating_dir_size || self.unknown_size {
-            fl!("calculating")
-        } else if let Some(error) = &self.dir_size_error {
-            error.clone()
-        } else {
-            format_size(self.total_size)
-        }
-    }
-
-    pub fn footer_summary(&self) -> String {
-        format!("{} selected ({})", self.breakdown_text(), self.size_text())
-    }
-}
-
-pub fn selection_menu_actions(
-    stats: &SelectionStats,
-    in_trash: bool,
-    include_move_to: bool,
-) -> Vec<SelectionMenuAction> {
-    let mut actions = Vec::new();
-
-    if in_trash {
-        actions.push(SelectionMenuAction::RestoreFromTrash);
-        if include_move_to {
-            actions.push(SelectionMenuAction::MoveTo);
-        }
-    } else {
-        if stats.can_open() {
-            actions.push(SelectionMenuAction::Open);
-        }
-        actions.push(SelectionMenuAction::Duplicate);
-        if include_move_to {
-            actions.push(SelectionMenuAction::MoveTo);
-        }
-    }
-
-    actions
 }
 
 #[derive(Debug)]
@@ -2484,20 +2267,6 @@ impl Item {
 
     pub fn path_opt(&self) -> Option<&PathBuf> {
         self.location_opt.as_ref()?.path_opt()
-    }
-
-    pub fn dir_size_path(&self) -> Option<PathBuf> {
-        match &self.metadata {
-            ItemMetadata::Trash { metadata, entry }
-                if matches!(metadata.size, TrashItemSize::Entries(_)) =>
-            {
-                let info_file = Path::new(&entry.id);
-                let trash_folder = info_file.parent()?.parent()?;
-                let name_in_trash = info_file.file_stem()?;
-                Some(trash_folder.join("files").join(name_in_trash))
-            }
-            _ => self.path_opt().cloned(),
-        }
     }
 
     pub fn can_gallery(&self) -> bool {
@@ -2977,104 +2746,6 @@ pub fn parse_hidden_file(path: &PathBuf) -> Box<[String]> {
 }
 
 impl Tab {
-    pub fn selection_stats(&self) -> Option<SelectionStats> {
-        let items = self.items_opt()?;
-        let mut stats = SelectionStats {
-            contains_items_known: true,
-            ..SelectionStats::default()
-        };
-
-        for item in items {
-            if !item.selected {
-                continue;
-            }
-
-            stats.selected_items += 1;
-
-            if item.metadata.is_dir() {
-                stats.selected_folders += 1;
-                match &item.metadata {
-                    ItemMetadata::Path { children_opt, .. } => {
-                        if let Some(children) = children_opt {
-                            stats.contained_items =
-                                stats.contained_items.saturating_add(*children as u64);
-                        } else {
-                            stats.contains_items_known = false;
-                        }
-                    }
-                    ItemMetadata::Trash { metadata, .. } => match metadata.size {
-                        TrashItemSize::Entries(entries) => {
-                            stats.contained_items =
-                                stats.contained_items.saturating_add(entries as u64);
-                        }
-                        TrashItemSize::Bytes(_) => {
-                            stats.contains_items_known = false;
-                        }
-                    },
-                    ItemMetadata::SimpleDir { entries } => {
-                        stats.contained_items = stats.contained_items.saturating_add(*entries);
-                    }
-                    ItemMetadata::SimpleFile { .. } => {}
-                    #[cfg(feature = "gvfs")]
-                    ItemMetadata::GvfsPath { children_opt, .. } => {
-                        if let Some(children) = children_opt {
-                            stats.contained_items =
-                                stats.contained_items.saturating_add(*children as u64);
-                        } else {
-                            stats.contains_items_known = false;
-                        }
-                    }
-                }
-
-                match &item.dir_size {
-                    DirSize::Calculating(_) => {
-                        stats.calculating_dir_size = true;
-                    }
-                    DirSize::Directory(size) => {
-                        stats.total_size = stats.total_size.saturating_add(*size);
-                    }
-                    DirSize::NotDirectory => {
-                        stats.unknown_size = true;
-                    }
-                    DirSize::Error(err) => {
-                        if stats.dir_size_error.is_none() {
-                            stats.dir_size_error = Some(err.clone());
-                        }
-                    }
-                }
-            } else {
-                stats.selected_files += 1;
-                if let Some(size) = item.metadata.file_size() {
-                    stats.total_size = stats.total_size.saturating_add(size);
-                } else {
-                    stats.unknown_size = true;
-                }
-            }
-        }
-
-        Some(stats)
-    }
-
-    pub fn all_selectable_items_selected(&self) -> bool {
-        self.items_opt().is_some_and(|items| {
-            let mut selectable_items = 0;
-            let mut selected_items = 0;
-
-            for item in items {
-                if !self.config.show_hidden && item.hidden {
-                    continue;
-                }
-
-                selectable_items += 1;
-                if item.selected {
-                    selected_items += 1;
-                }
-            }
-
-            selectable_items > 0 && selected_items == selectable_items
-        })
-    }
-
     pub fn new(
         location: Location,
         config: TabConfig,
@@ -3671,7 +3342,6 @@ impl Tab {
             Message::AutoScroll(auto_scroll) => {
                 commands.push(Command::AutoScroll(auto_scroll));
             }
-            Message::None => {}
             Message::ClickRelease(click_i_opt) => {
                 // Single click to open.
                 if !mod_ctrl && self.config.single_click {
@@ -6609,133 +6279,6 @@ impl Tab {
         .on_leave(move || Message::DndLeave(tab_location_3.clone()));
 
         dnd_dest.into()
-    }
-    pub fn multi_preview_view<'a>(
-        &'a self,
-        _mime_app_cache_opt: Option<&'a mime_app::MimeAppCache>,
-    ) -> Element<'a, Message> {
-        let cosmic_theme::Spacing {
-            space_xxxs,
-            space_xxs,
-            space_m,
-            ..
-        } = theme::active().cosmic().spacing;
-
-        let mut column = widget::column::with_capacity(4).spacing(space_m);
-
-        let selected_items: Vec<&Item> = self.items_opt().map_or(Vec::new(), |items| {
-            items.iter().filter(|item| item.selected).collect()
-        });
-        let handle = widget::icon::from_name("text-x-generic")
-            .size(IconSizes::default().grid())
-            .handle();
-
-        let icon = widget::icon::icon(handle.clone())
-            .content_fit(ContentFit::Contain)
-            .size(IconSizes::default().grid());
-
-        let icon_container1 = widget::container(icon.clone()).padding(padding::bottom(10).left(10));
-        let icon_container2 =
-            widget::container(icon.clone()).padding(padding::top(5).bottom(5).left(5).right(5));
-        let icon_container3 = widget::container(icon).padding(padding::top(10).right(10));
-        let preview_stack: Element<'a, Message> =
-            stack![icon_container1, icon_container2, icon_container3].into();
-
-        column = column.push(
-            widget::container(preview_stack)
-                .center_x(Length::Fill)
-                .max_height(THUMBNAIL_SIZE as f32),
-        );
-
-        let selection_stats = self.selection_stats().unwrap_or_default();
-        let in_trash = self.location.is_trash();
-        let all_selected = self.all_selectable_items_selected();
-        let selection_button_label = if all_selected {
-            fl!("deselect-all")
-        } else {
-            fl!("select-all")
-        };
-        let selection_button_message = if all_selected {
-            Message::SelectNone
-        } else {
-            Message::SelectAll
-        };
-
-        let mut details = widget::column::with_capacity(4).spacing(space_xxxs);
-        let mut mime_type_counts: BTreeMap<String, u64> = BTreeMap::new();
-        for item in selected_items.iter() {
-            *mime_type_counts.entry(item.mime.to_string()).or_insert(0) += 1;
-        }
-        let mime_label = match mime_type_counts.len() {
-            1 => mime_type_counts
-                .into_iter()
-                .next()
-                .map(|(mime, _)| mime)
-                .unwrap_or_else(|| fl!("mixed")),
-            _ => fl!("mixed"),
-        };
-
-        details = details.push(widget::text::heading(format!(
-            "{} {}",
-            selection_stats.selected_items,
-            if selection_stats.selected_items == 1 {
-                "Item"
-            } else {
-                "Items"
-            }
-        )));
-        details = details.push(widget::text::body(selection_stats.breakdown_text()));
-        details = details.push(widget::text::body(selection_stats.size_text()));
-        details = details.push(widget::text::body(fl!("type", mime = mime_label)));
-
-        let overflow_items = selection_menu_actions(&selection_stats, in_trash, in_trash);
-
-        let mut action_row = widget::row::with_capacity(4)
-            .spacing(space_xxs)
-            .align_y(Alignment::Center)
-            .width(Length::Fill)
-            .push(selection_action_button(
-                selection_button_label,
-                selection_button_message,
-            ));
-        if !in_trash {
-            action_row = action_row.push(selection_action_button(
-                fl!("move-to"),
-                Message::ContextAction(Action::MoveTo),
-            ));
-        }
-        action_row = action_row
-            .push(widget::space::horizontal())
-            .push(selection_action_icon_button(
-                delete_action_icon(16),
-                Message::ContextAction(Action::Delete),
-            ))
-            .push(
-                widget::menu::MenuBar::new(vec![widget::menu::Tree::with_children(
-                    Element::from(selection_more_menu_button()),
-                    overflow_items
-                        .into_iter()
-                        .map(|action| {
-                            menu::menu_tree_item(
-                                action.label(),
-                                None,
-                                menu::custom_menu_item_button_class(
-                                    menu::standard_menu_surface_color,
-                                ),
-                                action.message(),
-                            )
-                        })
-                        .collect(),
-                )])
-                .item_height(widget::menu::ItemHeight::Dynamic(40))
-                .item_width(widget::menu::ItemWidth::Uniform(220))
-                .style(menu::standard_overlay_menu_style as fn(&theme::Theme) -> _),
-            );
-
-        column = column.push(action_row);
-        column = column.push(details);
-
-        column.into()
     }
     pub fn view<'a>(
         &'a self,
